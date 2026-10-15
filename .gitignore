@@ -8,6 +8,7 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+.kotlin/
 build.log
 build_release.log
 expanded_card_crop.png
