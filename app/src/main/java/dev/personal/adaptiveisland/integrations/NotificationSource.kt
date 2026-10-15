@@ -1,8 +1,11 @@
 package dev.personal.adaptiveisland.integrations
 
 import android.app.Notification
+import android.app.PendingIntent
+import android.app.RemoteInput
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaMetadata
@@ -10,9 +13,11 @@ import android.media.session.MediaController
 import android.media.session.MediaSession
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.os.Bundle
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.util.Log
 import android.util.LruCache
 import androidx.core.graphics.drawable.toBitmap
 import dev.personal.adaptiveisland.overlay.ActivityPriority
@@ -44,6 +49,8 @@ data class NotificationItem(
     val icon: Bitmap?,
     val category: String? = null,
     val hasActions: Boolean = false,
+    val hasReply: Boolean = false,
+    val sensitive: Boolean = false,
 )
 
 /** The current media session, surfaced as an island activity. */
@@ -81,15 +88,79 @@ internal object MediaCache {
 }
 
 /**
+ * A quick action a notification exposes (e.g. Reply, Mute, Mark read).
+ * [requiresText] is true for RemoteInput actions, which need a typed reply.
+ */
+data class QuickAction(val title: String, val requiresText: Boolean = false)
+
+/**
  * Process-wide store of the notifications the island is currently showing.
  * Populated by [IslandNotificationListener] (a NotificationListenerService).
  */
 object NotificationSource {
 
+    private const val TAG = "IslandQuickAction"
+
     private val _notifications = MutableStateFlow<List<NotificationItem>>(emptyList())
     val notifications: StateFlow<List<NotificationItem>> = _notifications.asStateFlow()
 
+    /** A live, fire-able action captured from a posting app's notification. */
+    internal class RegisteredAction(
+        val label: String,
+        val intent: PendingIntent,
+        val remoteInputs: List<RemoteInput>,
+    )
+
+    /** Live, fire-able actions keyed by notification key. Not part of state. */
+    private class Registration(
+        val actions: List<RegisteredAction>,
+        val open: PendingIntent?,
+    )
+
+    private val registry =
+        java.util.concurrent.ConcurrentHashMap<String, Registration>()
+
+    internal fun register(
+        key: String,
+        actions: List<RegisteredAction>,
+        open: PendingIntent?,
+    ) {
+        registry[key] = Registration(actions, open)
+    }
+
+    /** The labels of the actions the given notification currently exposes. */
+    fun actionsFor(key: String): List<QuickAction> =
+        registry[key]?.actions?.map {
+            QuickAction(it.label, requiresText = it.remoteInputs.isNotEmpty())
+        }.orEmpty()
+
+    /**
+     * Fires the notification action at [index]. For RemoteInput ("Reply")
+     * actions, [text] is attached as the reply result; other actions ignore it.
+     */
+    fun fireAction(context: Context, key: String, index: Int, text: String? = null): Boolean {
+        val action = registry[key]?.actions?.getOrNull(index) ?: return false
+        return runCatching {
+            if (action.remoteInputs.isNotEmpty()) {
+            // Do not inject text from the overlay; fire the action so the app opens its composer.
+            action.intent.send()
+        } else {
+            action.intent.send()
+        }
+        }.onFailure { Log.w(TAG, "fireAction(${action.label}) failed", it) }.isSuccess
+    }
+
+    /** Opens the notification (its content intent, deep-linking into the app). */
+    fun open(key: String): Boolean {
+        val pi = registry[key]?.open ?: return false
+        return runCatching { pi.send() }
+            .onFailure { Log.w(TAG, "open failed", it) }
+            .isSuccess
+    }
+
     internal fun publish(items: List<NotificationItem>) {
+        val live = items.mapTo(HashSet()) { it.key }
+        registry.keys.retainAll(live)
         // Reference-equality on the cached bitmaps makes this cheap and stops
         // identical refreshes from triggering recomposition.
         if (_notifications.value == items) return
@@ -301,10 +372,21 @@ class IslandNotificationListener : NotificationListenerService() {
 
         val packageName = sbn.packageName ?: return null
         val appLabel = appLabel(packageName)
-        val icon = appIcon(packageName) ?: largeIcon(notification)
+        val icon = largeIcon(notification) ?: appIcon(packageName)
+
+        val key = sbn.key ?: "$packageName-${sbn.postTime}"
+        val registered = notification.actions?.mapNotNull { action ->
+            val label = action.title?.toString()?.takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
+            val intent = action.actionIntent ?: return@mapNotNull null
+            val remoteInputs = action.remoteInputs?.toList().orEmpty()
+            NotificationSource.RegisteredAction(label, intent, remoteInputs)
+        }.orEmpty()
+        val hasReply = registered.any { it.remoteInputs.isNotEmpty() }
+        NotificationSource.register(key, registered, notification.contentIntent)
 
         return NotificationItem(
-            key = sbn.key ?: "$packageName-${sbn.postTime}",
+            key = key,
             packageName = packageName,
             appLabel = appLabel,
             title = title.ifBlank { appLabel },
@@ -312,7 +394,9 @@ class IslandNotificationListener : NotificationListenerService() {
             postedAt = sbn.postTime,
             icon = icon,
             category = notification.category,
-            hasActions = !notification.actions.isNullOrEmpty(),
+            hasActions = registered.isNotEmpty(),
+            hasReply = hasReply,
+            sensitive = notification.visibility == Notification.VISIBILITY_SECRET,
         )
     }
 

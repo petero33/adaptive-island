@@ -1,16 +1,18 @@
 package dev.personal.adaptiveisland.overlay
 
+import android.app.Notification
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.PowerManager
+import android.util.Log
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -24,6 +26,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 
+
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,6 +46,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -59,10 +64,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.MaterialTheme
@@ -80,6 +88,7 @@ import dev.personal.adaptiveisland.integrations.MediaSource
 import dev.personal.adaptiveisland.integrations.NotificationSource
 import dev.personal.adaptiveisland.persistence.FeaturePreferences
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flowOf
 
 /** Everything the island needs to decide what to present. */
 data class IslandState(
@@ -88,6 +97,11 @@ data class IslandState(
     val topGapDp: Int = IslandGeometry.TOP_GAP_DP,
     val pillHeightDp: Int = IslandGeometry.PILL_HEIGHT_DP,
     val idleWidthDp: Int = IslandGeometry.IDLE_WIDTH_DP,
+    val prioritized: Boolean = false,
+    val stackEnabled: Boolean = true,
+    val quickActionsEnabled: Boolean = true,
+    val reduceEffects: Boolean = false,
+    val lowPower: Boolean = false,
 ) {
     val charging: IslandActivity.Charging?
         get() = activities.filterIsInstance<IslandActivity.Charging>().firstOrNull()
@@ -104,6 +118,22 @@ data class IslandState(
 }
 
 private const val INTRO_SCALE = 1.25f
+
+/** Log tag for the tile "open" path (BAL diagnostics). */
+private const val OPEN_TAG = "IslandOpen"
+
+/** At or below this level (and unplugged) the island trims its own effects. */
+private const val LOW_BATTERY_PERCENT = 20
+
+/** A neutral label shown in place of real content while privacy masking is on. */
+private fun neutralText(category: String?): String = when (category) {
+    Notification.CATEGORY_MESSAGE,
+    Notification.CATEGORY_EMAIL,
+    Notification.CATEGORY_SOCIAL,
+    Notification.CATEGORY_CALL,
+    Notification.CATEGORY_MISSED_CALL -> "New message"
+    else -> "New notification"
+}
 
 private val ChargingGreen = Color(0xFF30D158)
 private val BluetoothBlue = Color(0xFF4C9AFF)
@@ -139,21 +169,22 @@ private fun Modifier.solidIsland(shape: Shape): Modifier = this
  */
 private fun Modifier.glassIsland(shape: Shape): Modifier = this
     .clip(shape)
-    .background(Color(0x8C0C0C13))
+    // Denser frosted back + 3D top bevel + inner rim for iOS-like liquid glass.
+    .background(Color(0xB30F141F))
     .background(
         Brush.verticalGradient(
-            colors = listOf(Color(0x38FFFFFF), Color(0x14FFFFFF), Color(0x00FFFFFF)),
+            colors = listOf(Color(0x5CFFFFFF), Color(0x28FFFFFF), Color(0x0FFFFFFF)),
         ),
     )
     .background(
         Brush.horizontalGradient(
-            colors = listOf(Color(0x1AFFFFFF), Color(0x00FFFFFF), Color(0x14FFFFFF)),
+            colors = listOf(Color(0x28FFFFFF), Color(0x00FFFFFF), Color(0x1AFFFFFF)),
         ),
     )
     .border(
         width = 1.dp,
         brush = Brush.verticalGradient(
-            colors = listOf(Color(0x80FFFFFF), Color(0x24FFFFFF), Color(0x0FFFFFFF)),
+            colors = listOf(Color(0xD9FFFFFF), Color(0x66FFFFFF), Color(0x1A000000)),
         ),
         shape = shape,
     )
@@ -168,17 +199,38 @@ fun rememberIslandState(): IslandState {
     val showNotifications by prefs.enabledFlow("notifications").collectAsState(initial = false)
     val showMedia by prefs.enabledFlow("music_playback").collectAsState(initial = false)
     val prioritize by prefs.enabledFlow("activity_prioritization").collectAsState(initial = true)
+    val stackEnabled by prefs.enabledFlow("activity_stack").collectAsState(initial = true)
+    val quickActionsEnabled by prefs.enabledFlow("quick_actions").collectAsState(initial = true)
+    val lowPowerEnabled by prefs.enabledFlow("low_power_mode").collectAsState(initial = true)
+    val privacyShield by prefs.enabledFlow("privacy_shield").collectAsState(initial = false)
+    val discreetMode by prefs.enabledFlow("discreet_mode").collectAsState(initial = false)
+
+    // The battery broadcast is sticky and cheap; it also feeds low-power mode.
     val battery by BatterySource.observe(context.applicationContext).collectAsState(
         initial = BatteryState(levelPercent = 0, plugged = false, charging = false, full = false),
     )
-    val bluetooth by BluetoothSource.observe(context.applicationContext).collectAsState(
-        initial = BluetoothState(),
-    )
+    // Optional integrations are suspended while their feature is off, so a
+    // disabled island does no Bluetooth work at all.
+    val bluetoothFlow = remember(showBluetooth) {
+        if (showBluetooth == true) BluetoothSource.observe(context.applicationContext)
+        else flowOf(BluetoothState())
+    }
+    val bluetooth by bluetoothFlow.collectAsState(initial = BluetoothState())
+    val powerSave by rememberPowerSave(context.applicationContext)
+
     val notifications by NotificationSource.notifications.collectAsState()
     val media by MediaSource.nowPlaying.collectAsState()
     val topGapDp by prefs.topGapDpFlow().collectAsState(initial = IslandGeometry.TOP_GAP_DP)
     val pillHeightDp by prefs.pillHeightDpFlow().collectAsState(initial = IslandGeometry.PILL_HEIGHT_DP)
     val idleWidthDp by prefs.idleWidthDpFlow().collectAsState(initial = IslandGeometry.IDLE_WIDTH_DP)
+
+    val lowPower = lowPowerEnabled != false &&
+        (powerSave || (battery.levelPercent in 1..LOW_BATTERY_PERCENT && !battery.plugged))
+
+    // Privacy applies at one place — here — so it holds for every activity and
+    // never has to be configured per notification source.
+    val maskNotifications = privacyShield == true || discreetMode == true
+    val maskMedia = discreetMode == true
 
     val activities = buildList {
         if (showCharging == true && battery.plugged) {
@@ -193,8 +245,8 @@ fun rememberIslandState(): IslandState {
                     IslandActivity.Media(
                         packageName = item.packageName,
                         appLabel = item.appLabel,
-                        title = item.title,
-                        artist = item.artist,
+                        title = if (maskMedia) item.appLabel else item.title,
+                        artist = if (maskMedia) "Playing now" else item.artist,
                         icon = item.icon,
                         isPlaying = item.isPlaying,
                     ),
@@ -203,16 +255,19 @@ fun rememberIslandState(): IslandState {
         }
         if (showNotifications == true) {
             notifications.take(MAX_NOTIFICATION_TILES).forEach { item ->
+                // Sensitive alerts stay out of the card entirely while masked.
+                if (maskNotifications && item.sensitive) return@forEach
                 add(
                     IslandActivity.Notification(
                         key = item.key,
                         packageName = item.packageName,
                         appLabel = item.appLabel,
-                        title = item.title,
-                        text = item.text,
+                        title = if (maskNotifications) item.appLabel else item.title,
+                        text = if (maskNotifications) neutralText(item.category) else item.text,
                         icon = item.icon,
                         category = item.category,
                         hasActions = item.hasActions,
+                        hasReply = item.hasReply,
                     ),
                 )
             }
@@ -237,7 +292,35 @@ fun rememberIslandState(): IslandState {
         topGapDp = topGapDp,
         pillHeightDp = pillHeightDp,
         idleWidthDp = idleWidthDp,
+        prioritized = prioritize != false,
+        stackEnabled = stackEnabled != false,
+        quickActionsEnabled = quickActionsEnabled != false,
+        reduceEffects = lowPower,
+        lowPower = lowPower,
     )
+}
+
+/** Observes the system power-save state so effects can adapt to it live. */
+@Composable
+private fun rememberPowerSave(context: Context): androidx.compose.runtime.State<Boolean> {
+    val state = remember { mutableStateOf(false) }
+    DisposableEffect(context) {
+        val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        state.value = power?.isPowerSaveMode == true
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                state.value = power?.isPowerSaveMode == true
+            }
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            context,
+            receiver,
+            IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        onDispose { runCatching { context.unregisterReceiver(receiver) } }
+    }
+    return state
 }
 
 /**
@@ -253,7 +336,34 @@ fun IslandHost(state: IslandState) {
     MaterialTheme {
         val expanded by IslandExpansion.expanded.collectAsState()
         val hasContent = state.hasContent
-        LaunchedEffect(hasContent) { if (!hasContent) IslandExpansion.collapse() }
+        val activities = state.activities
+        val selectedId by IslandSelection.selectedId.collectAsState()
+
+        LaunchedEffect(hasContent) {
+            if (!hasContent) {
+                IslandExpansion.collapse()
+                IslandSelection.clear()
+            }
+        }
+
+        // Remember the last activity the user used, but let a more urgent one
+        // take over (an incoming call should surface over paused music).
+        LaunchedEffect(activities.map { it.id }, state.prioritized) {
+            if (activities.isEmpty()) {
+                IslandSelection.clear()
+                return@LaunchedEffect
+            }
+            val current = activities.firstOrNull { it.id == selectedId }
+            val top = activities.first()
+            val shouldTakeOver = state.prioritized &&
+                current != null &&
+                ActivityPriority.score(top) > ActivityPriority.score(current)
+            if (current == null || shouldTakeOver) {
+                IslandSelection.select(top.id)
+            }
+        }
+
+        val focused = activities.firstOrNull { it.id == selectedId } ?: activities.firstOrNull()
         val showPanel = expanded && hasContent
         val visible = state.showIdlePill || hasContent
 
@@ -289,13 +399,17 @@ fun IslandHost(state: IslandState) {
                     ExpandedPanel(
                         state = state,
                         spacing = spacing,
+                        focusedId = focused?.id,
+                        reduceEffects = state.reduceEffects,
                     )
                 } else {
                     CollapsedPill(
                         state = state,
+                        focused = focused,
                         width = collapsedWidth,
                         pillHeight = pillHeight,
                         tapZone = tapZone,
+                        reduceEffects = state.reduceEffects,
                     )
                 }
             }
@@ -306,14 +420,42 @@ fun IslandHost(state: IslandState) {
 @Composable
 private fun CollapsedPill(
     state: IslandState,
+    focused: IslandActivity?,
     width: Dp,
     pillHeight: Dp,
     tapZone: Dp,
+    reduceEffects: Boolean,
 ) {
     val charging = state.charging
-    val glow = if (charging != null) chargingGlow() else 0f
-    val introScale = chargingIntro(active = charging != null)
-    Column(modifier = Modifier.width(width)) {
+    // A static rim only. A continuous "breathing" glow redrew the overlay at the
+    // full display refresh rate for as long as the cable stayed in (~100 fps,
+    // measured), which dominated idle CPU. The one-shot chargingIntro below keeps
+    // the "plugged in" flourish without any permanent redraw.
+    val glow = when {
+        charging == null -> 0f
+        reduceEffects -> 0.45f
+        else -> 0.70f
+    }
+    val introScale = if (reduceEffects) 1f else chargingIntro(active = charging != null)
+    val activities = state.activities
+    val index = activities.indexOfFirst { it.id == focused?.id }.coerceAtLeast(0)
+
+    val cycle: (Int) -> Unit = { direction ->
+        if (state.stackEnabled && activities.size > 1) {
+            val next = (index + direction + activities.size) % activities.size
+            IslandSelection.select(activities[next].id)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .width(width)
+            .islandGestures(
+                enabled = state.stackEnabled && activities.size > 1,
+                onTap = { if (state.hasContent) IslandExpansion.toggle() },
+                onSwipe = cycle,
+            ),
+    ) {
         val shape = RoundedCornerShape(pillHeight / 2)
         Box(
             modifier = Modifier
@@ -329,24 +471,79 @@ private fun CollapsedPill(
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            CollapsedContent(state)
+            AnimatedContent(
+                targetState = focused,
+                transitionSpec = {
+                    fadeIn(tween(160)) togetherWith fadeOut(tween(120))
+                },
+                label = "pillActivity",
+            ) { activity ->
+                if (activity != null) {
+                    CollapsedContent(activity, state.notificationCount, activities.size, index)
+                }
+            }
         }
         if (state.hasContent) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(tapZone)
-                    .pointerInput(Unit) {
-                        detectTapGestures { IslandExpansion.toggle() }
-                    },
+                    .height(tapZone),
             )
         }
     }
 }
 
+/**
+ * Lightweight tap / horizontal-swipe detector. Lets the compact pill cycle
+ * between activities with a flick, and expand on a plain tap.
+ */
+private fun Modifier.islandGestures(
+    enabled: Boolean,
+    onTap: () -> Unit,
+    onSwipe: (Int) -> Unit,
+): Modifier = if (!enabled) {
+    this.pointerInput(Unit) { detectTapGestures { onTap() } }
+} else {
+    this.pointerInput(Unit) {
+        val threshold = 36.dp.toPx()
+        val slop = viewConfiguration.touchSlop
+        awaitPointerEventScope {
+            while (true) {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                var totalDx = 0f
+                var totalDy = 0f
+                var up = false
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                    if (change.changedToUpIgnoreConsumed()) {
+                        up = true
+                        break
+                    }
+                    val delta = change.positionChange()
+                    totalDx += delta.x
+                    totalDy += delta.y
+                }
+                if (!up) continue
+                when {
+                    kotlin.math.abs(totalDx) > threshold &&
+                        kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy) ->
+                        onSwipe(if (totalDx < 0f) 1 else -1)
+                    kotlin.math.abs(totalDx) < slop && kotlin.math.abs(totalDy) < slop ->
+                        onTap()
+                }
+            }
+        }
+    }
+}
+
 @Composable
-private fun CollapsedContent(state: IslandState) {
-    val primary = state.primary ?: return
+private fun CollapsedContent(
+    activity: IslandActivity,
+    notificationCount: Int,
+    pageCount: Int,
+    pageIndex: Int,
+) {
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -359,12 +556,40 @@ private fun CollapsedContent(state: IslandState) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                PrimaryGlyph(primary, glyphSize)
+                PrimaryGlyph(activity, glyphSize)
             }
             Spacer(Modifier.width(IslandGeometry.CUTOUT_CLEARANCE_DP.dp))
             Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                if (roomyEnough) PrimaryTrailing(primary, state.notificationCount)
+                if (roomyEnough) PrimaryTrailing(activity, notificationCount)
             }
+        }
+        if (pageCount > 1) {
+            PageDots(
+                count = pageCount,
+                index = pageIndex,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 3.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun PageDots(count: Int, index: Int, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        repeat(count) { i ->
+            val active = i == index
+            Box(
+                modifier = Modifier
+                    .size(if (active) 5.dp else 3.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = if (active) 0.85f else 0.35f)),
+            )
         }
     }
 }
@@ -425,27 +650,52 @@ private fun Label(text: String, color: Color) {
 private fun ExpandedPanel(
     state: IslandState,
     spacing: Dp,
+    focusedId: String?,
+    reduceEffects: Boolean,
 ) {
+    val activities = state.activities
+    // With the activity stack on, the activity you were using is promoted to
+    // the top so "tap to expand the one you need" lands on what you expect.
+    val ordered = if (state.stackEnabled && focusedId != null) {
+        val focused = activities.filter { it.id == focusedId }
+        focused + activities.filterNot { it.id == focusedId }
+    } else {
+        activities
+    }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(spacing),
     ) {
-        state.activities.forEachIndexed { index, activity ->
-            TileEntrance(index = index) {
-                if (activity is IslandActivity.Media) {
-            MediaTile(activity, index)
-        } else {
-            ActivityTile(activity, index)
-        }
+        ordered.forEachIndexed { index, activity ->
+            TileEntrance(index = index, activityId = activity.id, reduceEffects = reduceEffects) {
+                when (activity) {
+                    is IslandActivity.Media -> MediaTile(activity, index, reduceEffects)
+                    is IslandActivity.Notification -> NotificationTile(
+                        activity = activity,
+                        index = index,
+                        quickActionsEnabled = state.quickActionsEnabled,
+                        reduceEffects = reduceEffects,
+                    )
+                    else -> ActivityTile(activity, index, reduceEffects)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun TileEntrance(index: Int, content: @Composable () -> Unit) {
-    var revealed by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
+private fun TileEntrance(
+    index: Int,
+    activityId: String,
+    reduceEffects: Boolean,
+    content: @Composable () -> Unit,
+) {
+    var revealed by remember(activityId) { mutableStateOf(reduceEffects) }
+    LaunchedEffect(activityId, reduceEffects) {
+        if (reduceEffects) {
+            revealed = true
+            return@LaunchedEffect
+        }
         delay(index * 55L)
         revealed = true
     }
@@ -464,7 +714,7 @@ private fun TileEntrance(index: Int, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun MediaTile(activity: IslandActivity.Media, index: Int) {
+private fun MediaTile(activity: IslandActivity.Media, index: Int, reduceEffects: Boolean) {
     val shape = RoundedCornerShape(IslandGeometry.TILE_RADIUS_DP.dp)
     Column(
         modifier = Modifier
@@ -537,7 +787,162 @@ private fun MediaTile(activity: IslandActivity.Media, index: Int) {
 }
 
 @Composable
-private fun ActivityTile(activity: IslandActivity, index: Int) {
+private fun NotificationTile(
+    activity: IslandActivity.Notification,
+    index: Int,
+    quickActionsEnabled: Boolean,
+    reduceEffects: Boolean,
+) {
+    val context = LocalContext.current
+    val shape = RoundedCornerShape(IslandGeometry.TILE_RADIUS_DP.dp)
+    val actions = if (quickActionsEnabled) {
+        NotificationSource.actionsFor(activity.key).take(2)
+    } else {
+        emptyList()
+    }
+
+    val launchable = remember(activity.packageName) {
+        context.packageManager.getLaunchIntentForPackage(activity.packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    // Android 15/16 background-activity-launch rules block sending another app's
+    // content PendingIntent from a third-party overlay (it silently no-ops when
+    // pi.send() returns true). Our own startActivity is exempt because this uid
+    // owns a visible non-app window and runs a foreground service, so prefer it
+    // and keep the deep-link PendingIntent only as a fallback.
+    val open: () -> Unit = {
+        val launched = launchable?.let { intent ->
+            runCatching { context.startActivity(intent) }
+                .onFailure { Log.w(OPEN_TAG, "startActivity(${activity.packageName}) failed", it) }
+                .isSuccess
+        } ?: false
+        if (!launched && !NotificationSource.open(activity.key)) {
+            Log.w(OPEN_TAG, "no launch or content intent for ${activity.packageName}")
+        }
+        IslandSelection.select(activity.id)
+        IslandExpansion.collapse()
+    }
+
+    // Tapping a RemoteInput ("Reply") chip reveals a small inline text field;
+    // other chips fire their action immediately.
+    var replyIndex by remember(activity.key) { mutableStateOf<Int?>(null) }
+    var replyText by remember(activity.key) { mutableStateOf("") }
+
+    val sheen = rememberSheen(index, reduceEffects)
+
+    Column(
+        modifier = Modifier
+            .widthIn(min = 190.dp, max = 300.dp)
+            .glassIsland(shape)
+            .sheenOverlay(sheen)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        Row(
+            modifier = Modifier.clickable(onClick = open),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppIcon(bitmap = activity.icon, size = 30.dp, fallbackColor = NotificationAccent)
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = activity.title,
+                    color = BoltWhite,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = activity.text.ifBlank { activity.appLabel },
+                    color = MutedText,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        if (quickActionsEnabled) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                QuickActionChip(
+                    label = "Open",
+                    accent = NotificationAccent,
+                    onClick = open,
+                )
+                actions.forEachIndexed { actionIndex, action ->
+                    QuickActionChip(
+                        label = action.title,
+                        accent = NotificationAccent,
+                        onClick = {
+                            NotificationSource.fireAction(context, activity.key, actionIndex)
+                            IslandExpansion.collapse()
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickActionChip(
+    label: String,
+    accent: Color,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(15.dp))
+            .background(Color.White.copy(alpha = 0.10f))
+            .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(15.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = label,
+            color = accent,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun rememberSheen(index: Int, reduceEffects: Boolean = false): Animatable<Float, *> {
+    val sheen = remember { Animatable(if (reduceEffects) 1f else 0f) }
+    LaunchedEffect(reduceEffects) {
+        if (reduceEffects) return@LaunchedEffect
+        // Subtler, faster sheen that runs once per appearance.
+        delay(index * 40L)
+        sheen.animateTo(1f, tween(durationMillis = 500, easing = FastOutSlowInEasing))
+    }
+    return sheen
+}
+
+private fun Modifier.sheenOverlay(sheen: Animatable<Float, *>): Modifier = drawWithContent {
+    drawContent()
+    val x = (sheen.value * 1.7f - 0.35f) * size.width
+    drawRect(
+        brush = Brush.linearGradient(
+            colors = listOf(
+                Color.Transparent,
+                Color(0x4DFFFFFF),
+                Color.Transparent,
+            ),
+            start = Offset(x - size.height, 0f),
+            end = Offset(x, size.height),
+        ),
+    )
+}
+
+@Composable
+private fun ActivityTile(activity: IslandActivity, index: Int, reduceEffects: Boolean = false) {
     val context = LocalContext.current
     val launchPackage = when (activity) {
         is IslandActivity.Notification -> activity.packageName
@@ -551,10 +956,11 @@ private fun ActivityTile(activity: IslandActivity, index: Int) {
     val shape = RoundedCornerShape(IslandGeometry.TILE_RADIUS_DP.dp)
 
     // One-shot liquid-glass sheen that sweeps across the card as it appears.
-    val sheen = remember { Animatable(0f) }
-    LaunchedEffect(Unit) {
-        delay(index * 55L + 80L)
-        sheen.animateTo(1f, tween(durationMillis = 850, easing = FastOutSlowInEasing))
+    val sheen = remember { Animatable(if (reduceEffects) 1f else 0f) }
+    LaunchedEffect(reduceEffects) {
+        if (reduceEffects) return@LaunchedEffect
+        delay(index * 40L)
+        sheen.animateTo(1f, tween(durationMillis = 500, easing = FastOutSlowInEasing))
     }
 
     Row(
@@ -708,21 +1114,6 @@ private fun AppIcon(bitmap: android.graphics.Bitmap?, size: Dp, fallbackColor: C
                 .background(fallbackColor.copy(alpha = 0.35f)),
         )
     }
-}
-
-@Composable
-private fun chargingGlow(): Float {
-    val transition = rememberInfiniteTransition(label = "chargeGlow")
-    val alpha by transition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 0.75f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "glowAlpha",
-    )
-    return alpha
 }
 
 @Composable
