@@ -29,6 +29,8 @@ sealed interface IslandActivity {
         val title: String,
         val text: String,
         val icon: android.graphics.Bitmap?,
+        val category: String? = null,
+        val hasActions: Boolean = false,
     ) : IslandActivity {
         override val id: String = "notification:$key"
     }

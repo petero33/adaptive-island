@@ -15,6 +15,7 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.LruCache
 import androidx.core.graphics.drawable.toBitmap
+import dev.personal.adaptiveisland.overlay.ActivityPriority
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,6 +42,8 @@ data class NotificationItem(
     val text: String,
     val postedAt: Long,
     val icon: Bitmap?,
+    val category: String? = null,
+    val hasActions: Boolean = false,
 )
 
 /** The current media session, surfaced as an island activity. */
@@ -114,11 +117,49 @@ object MediaSource {
     val nowPlaying: StateFlow<MediaItem?> = _nowPlaying.asStateFlow()
 
     internal val current: MediaItem? get() = _nowPlaying.value
+    internal var controller: MediaController? = null
+        private set
 
-    internal fun publish(item: MediaItem?) {
+    internal fun attach(item: MediaItem?, controller: MediaController?) {
+        if (this.controller !== controller) {
+            runCatching { this.controller?.unregisterCallback(emptyCallback) }
+            // MediaController from getActiveSessions shouldn't be released arbitrarily in all versions
+            // Ignore release if unavailable; just detach
+        }
+        this.controller = controller
         if (_nowPlaying.value == item) return
         _nowPlaying.value = item
     }
+
+    fun play() {
+        controller?.transportControls?.play()
+    }
+
+    fun pause() {
+        controller?.transportControls?.pause()
+    }
+
+    fun toggle() {
+        val c = controller ?: return
+        val state = c.playbackState?.state
+        val tc = c.transportControls
+        when (state) {
+            PlaybackState.STATE_PLAYING,
+            PlaybackState.STATE_BUFFERING,
+            PlaybackState.STATE_CONNECTING -> tc.pause()
+            else -> tc.play()
+        }
+    }
+
+    fun next() {
+        controller?.transportControls?.skipToNext()
+    }
+
+    fun previous() {
+        controller?.transportControls?.skipToPrevious()
+    }
+
+    private val emptyCallback = object : MediaController.Callback() {}
 }
 
 /**
@@ -170,8 +211,16 @@ class IslandNotificationListener : NotificationListenerService() {
     private fun publishNotifications(all: List<StatusBarNotification>) {
         val items = all.asSequence()
             .filterNot { it.isOngoing }
+            .filterNot { it.notification?.category == Notification.CATEGORY_TRANSPORT }
             .filter { it.hasVisibleText() }
-            .sortedByDescending { it.postTime }
+            // One notification per app: keep the most important (then newest)
+            // from each package so a chatty app can't crowd out the island.
+            .groupBy { it.packageName }
+            .map { (_, group) -> group.maxWith(compareBy({ rankOf(it) }, { it.postTime })) }
+            .sortedWith(
+                compareByDescending<StatusBarNotification> { rankOf(it) }
+                    .thenByDescending { it.postTime },
+            )
             .take(MAX_NOTIFICATION_TILES)
             .map { toItem(it) }
             .filterNotNull()
@@ -179,10 +228,66 @@ class IslandNotificationListener : NotificationListenerService() {
         NotificationSource.publish(items)
     }
 
+    private fun rankOf(sbn: StatusBarNotification): Int =
+        ActivityPriority.rankNotification(
+            category = sbn.notification?.category,
+            hasActions = !sbn.notification?.actions.isNullOrEmpty(),
+        )
+
     private fun publishMedia(all: List<StatusBarNotification>) {
         val sbn = all.firstOrNull { it.notification?.category == Notification.CATEGORY_TRANSPORT }
-        val item = sbn?.let { toMedia(it) }
-        MediaSource.publish(item)
+        if (sbn == null) {
+            if (MediaSource.current != null || MediaSource.controller != null) {
+                MediaSource.attach(null, null)
+            }
+            return
+        }
+        val pair: kotlin.Pair<MediaItem?, MediaController?>? = toMediaWithController(sbn)
+        val item = pair?.first
+        val controller = pair?.second
+        MediaSource.attach(item, controller)
+    }
+
+    private fun toMediaWithController(sbn: StatusBarNotification): kotlin.Pair<MediaItem?, MediaController?>? {
+        val notification = sbn.notification ?: return null
+        val extras = notification.extras ?: return null
+        val packageName = sbn.packageName ?: return null
+
+        val session = resolveSession(notification)
+        val metadata = session?.metadata
+
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
+            ?.takeIf { it.isNotBlank() }
+            ?: metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() }
+            ?: return null
+
+        val artist = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
+            ?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.takeIf { it.isNotBlank() }
+            ?: metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST)?.takeIf { it.isNotBlank() }
+            ?: metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)?.takeIf { it.isNotBlank() }
+
+        val icon = largeIcon(notification)
+            ?: metadata?.let { it.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART) ?: it.getBitmap(MediaMetadata.METADATA_KEY_ART) }
+            ?: appIcon(packageName)
+
+        val playing = session?.playbackState?.state == PlaybackState.STATE_PLAYING ||
+            notification.isPlaying()
+
+        val item = MediaItem(
+            packageName = packageName,
+            appLabel = appLabel(packageName),
+            title = title,
+            artist = artist,
+            icon = icon,
+            isPlaying = playing,
+            postedAt = sbn.postTime,
+        )
+        return Pair(item, session)
+    }
+
+    private fun toMediaCompat(sbn: StatusBarNotification): MediaItem? {
+        return toMediaWithController(sbn)?.first
     }
 
     private fun toItem(sbn: StatusBarNotification): NotificationItem? {
@@ -206,6 +311,8 @@ class IslandNotificationListener : NotificationListenerService() {
             text = text,
             postedAt = sbn.postTime,
             icon = icon,
+            category = notification.category,
+            hasActions = !notification.actions.isNullOrEmpty(),
         )
     }
 

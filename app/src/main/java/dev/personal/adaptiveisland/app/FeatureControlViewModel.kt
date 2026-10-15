@@ -95,7 +95,7 @@ class FeatureControlViewModel(application: Application) : AndroidViewModel(appli
         ) { enabled, ownership, granted ->
             FeatureUiState(
                 definition = definition,
-                enabled = enabled ?: definition.isMaster,
+                enabled = enabled ?: (definition.isMaster || definition.defaultEnabled),
                 ownership = ownership
                     ?.let { stored -> runCatching { Ownership.valueOf(stored) }.getOrNull() }
                     ?: definition.defaultOwnership,
@@ -106,7 +106,7 @@ class FeatureControlViewModel(application: Application) : AndroidViewModel(appli
 
     private fun defaultState(definition: FeatureDefinition) = FeatureUiState(
         definition = definition,
-        enabled = definition.isMaster,
+        enabled = definition.isMaster || definition.defaultEnabled,
         ownership = definition.defaultOwnership,
         capability = definition.defaultCapability,
         permission = permissionFor(definition, overlayGranted.value),

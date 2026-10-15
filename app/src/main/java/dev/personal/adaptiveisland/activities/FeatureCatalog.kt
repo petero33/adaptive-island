@@ -22,6 +22,7 @@ data class FeatureDefinition(
     val defaultOwnership: Ownership,
     val requiresOverlay: Boolean = false,
     val isMaster: Boolean = false,
+    val defaultEnabled: Boolean = false,
 )
 
 enum class FeatureGroup(val label: String) {
@@ -43,6 +44,15 @@ object FeatureCatalog {
             defaultOwnership = Ownership.ADAPTIVE_ISLAND,
             requiresOverlay = true,
             isMaster = true,
+        ),
+        FeatureDefinition(
+            id = "activity_prioritization",
+            title = "Intelligent activity prioritization",
+            description = "Let the island decide what deserves attention: calls over music, navigation stays visible, timers rise as they near zero, action-enabled apps on top.",
+            group = FeatureGroup.CORE,
+            defaultCapability = Capability.SUPPORTED,
+            defaultOwnership = Ownership.ADAPTIVE_ISLAND,
+            defaultEnabled = true,
         ),
         FeatureDefinition(
             id = "charging",

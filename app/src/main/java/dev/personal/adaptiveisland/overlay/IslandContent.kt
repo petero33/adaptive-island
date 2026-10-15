@@ -22,6 +22,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,8 +40,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -64,6 +65,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -164,6 +167,7 @@ fun rememberIslandState(): IslandState {
     val showBluetooth by prefs.enabledFlow("bluetooth").collectAsState(initial = false)
     val showNotifications by prefs.enabledFlow("notifications").collectAsState(initial = false)
     val showMedia by prefs.enabledFlow("music_playback").collectAsState(initial = false)
+    val prioritize by prefs.enabledFlow("activity_prioritization").collectAsState(initial = true)
     val battery by BatterySource.observe(context.applicationContext).collectAsState(
         initial = BatteryState(levelPercent = 0, plugged = false, charging = false, full = false),
     )
@@ -207,15 +211,29 @@ fun rememberIslandState(): IslandState {
                         title = item.title,
                         text = item.text,
                         icon = item.icon,
+                        category = item.category,
+                        hasActions = item.hasActions,
                     ),
                 )
             }
         }
     }
 
+    // When prioritization is on (the default), rank what deserves attention:
+    // calls over music, navigation/timers above, action-enabled apps on top.
+    // sortedWith is stable, so equal scores keep their source order (which the
+    // notification listener already sorted by rank then recency).
+    val ordered = if (prioritize != false) {
+        activities.sortedWith(
+            compareByDescending<IslandActivity> { ActivityPriority.score(it) },
+        )
+    } else {
+        activities
+    }
+
     return IslandState(
         showIdlePill = showIdlePill ?: true,
-        activities = activities,
+        activities = ordered,
         topGapDp = topGapDp,
         pillHeightDp = pillHeightDp,
         idleWidthDp = idleWidthDp,
@@ -414,7 +432,11 @@ private fun ExpandedPanel(
     ) {
         state.activities.forEachIndexed { index, activity ->
             TileEntrance(index = index) {
-                ActivityTile(activity, index)
+                if (activity is IslandActivity.Media) {
+            MediaTile(activity, index)
+        } else {
+            ActivityTile(activity, index)
+        }
             }
         }
     }
@@ -438,6 +460,79 @@ private fun TileEntrance(index: Int, content: @Composable () -> Unit) {
         ),
     ) {
         content()
+    }
+}
+
+@Composable
+private fun MediaTile(activity: IslandActivity.Media, index: Int) {
+    val shape = RoundedCornerShape(IslandGeometry.TILE_RADIUS_DP.dp)
+    Column(
+        modifier = Modifier
+            .widthIn(min = 220.dp, max = 340.dp)
+            .height(96.dp)
+            .glassIsland(shape)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AppIcon(bitmap = activity.icon, size = 40.dp, fallbackColor = MediaAccent)
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = activity.title,
+                    color = BoltWhite,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (activity.artist?.isNotBlank() == true) {
+                    Text(
+                        text = activity.artist,
+                        color = MutedText,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clickable { MediaSource.previous() },
+                contentAlignment = Alignment.Center
+            ) {
+                PreviousGlyph(modifier = Modifier.size(20.dp))
+            }
+            Spacer(Modifier.width(20.dp))
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clickable { MediaSource.toggle() },
+                contentAlignment = Alignment.Center
+            ) {
+                MediaTransportGlyph(
+                    playing = activity.isPlaying,
+                    modifier = Modifier.size(28.dp),
+                    color = BoltWhite,
+                )
+            }
+            Spacer(Modifier.width(20.dp))
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clickable { MediaSource.next() },
+                contentAlignment = Alignment.Center
+            ) {
+                NextGlyph(modifier = Modifier.size(20.dp))
+            }
+        }
     }
 }
 
@@ -642,6 +737,40 @@ private fun chargingIntro(active: Boolean): Float {
         }
     }
     return anim.value
+}
+
+@Composable
+private fun PreviousGlyph(modifier: Modifier = Modifier, color: Color = BoltWhite) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val path = Path().apply {
+            moveTo(w * 0.78f, h * 0.18f)
+            lineTo(w * 0.78f, h * 0.82f)
+            lineTo(w * 0.32f, h * 0.50f)
+            close()
+            moveTo(w * 0.24f, h * 0.18f)
+            lineTo(w * 0.24f, h * 0.82f)
+        }
+        drawPath(path = path, color = color, style = Stroke(width = (w * 0.12f).coerceAtLeast(2f)))
+    }
+}
+
+@Composable
+private fun NextGlyph(modifier: Modifier = Modifier, color: Color = BoltWhite) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val path = Path().apply {
+            moveTo(w * 0.22f, h * 0.18f)
+            lineTo(w * 0.22f, h * 0.82f)
+            lineTo(w * 0.68f, h * 0.50f)
+            close()
+            moveTo(w * 0.76f, h * 0.18f)
+            lineTo(w * 0.76f, h * 0.82f)
+        }
+        drawPath(path = path, color = color, style = Stroke(width = (w * 0.12f).coerceAtLeast(2f)))
+    }
 }
 
 /** Crisp pair of earbuds, used for the Bluetooth pill and tile. */
