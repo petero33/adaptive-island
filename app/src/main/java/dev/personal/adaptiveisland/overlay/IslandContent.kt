@@ -3,7 +3,6 @@ package dev.personal.adaptiveisland.overlay
 import android.content.Intent
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -73,6 +72,8 @@ import dev.personal.adaptiveisland.integrations.BatterySource
 import dev.personal.adaptiveisland.integrations.BatteryState
 import dev.personal.adaptiveisland.integrations.BluetoothSource
 import dev.personal.adaptiveisland.integrations.BluetoothState
+import dev.personal.adaptiveisland.integrations.MAX_NOTIFICATION_TILES
+import dev.personal.adaptiveisland.integrations.MediaSource
 import dev.personal.adaptiveisland.integrations.NotificationSource
 import dev.personal.adaptiveisland.persistence.FeaturePreferences
 import kotlinx.coroutines.delay
@@ -99,12 +100,12 @@ data class IslandState(
         get() = activities.isNotEmpty()
 }
 
-private const val MAX_NOTIFICATION_TILES = 3
 private const val INTRO_SCALE = 1.25f
 
 private val ChargingGreen = Color(0xFF30D158)
 private val BluetoothBlue = Color(0xFF4C9AFF)
 private val NotificationAccent = Color(0xFF64D2FF)
+private val MediaAccent = Color(0xFFFF375F)
 private val BoltWhite = Color.White
 private val MutedText = Color(0xFF9AA0AE)
 
@@ -116,13 +117,13 @@ private fun Modifier.solidIsland(shape: Shape): Modifier = this
     .clip(shape)
     .background(
         Brush.verticalGradient(
-            colors = listOf(Color(0xFF3A3A42), Color(0xFF17171C), Color(0xFF070709)),
+            colors = listOf(Color(0xFF232329), Color(0xFF0E0E12), Color(0xFF020203)),
         ),
     )
     .border(
         width = 1.dp,
         brush = Brush.verticalGradient(
-            colors = listOf(Color(0x66FFFFFF), Color(0x14FFFFFF), Color(0x0AFFFFFF)),
+            colors = listOf(Color(0x59FFFFFF), Color(0x0FFFFFFF), Color(0x08FFFFFF)),
         ),
         shape = shape,
     )
@@ -162,6 +163,7 @@ fun rememberIslandState(): IslandState {
     val showCharging by prefs.enabledFlow("charging").collectAsState(initial = false)
     val showBluetooth by prefs.enabledFlow("bluetooth").collectAsState(initial = false)
     val showNotifications by prefs.enabledFlow("notifications").collectAsState(initial = false)
+    val showMedia by prefs.enabledFlow("music_playback").collectAsState(initial = false)
     val battery by BatterySource.observe(context.applicationContext).collectAsState(
         initial = BatteryState(levelPercent = 0, plugged = false, charging = false, full = false),
     )
@@ -169,6 +171,7 @@ fun rememberIslandState(): IslandState {
         initial = BluetoothState(),
     )
     val notifications by NotificationSource.notifications.collectAsState()
+    val media by MediaSource.nowPlaying.collectAsState()
     val topGapDp by prefs.topGapDpFlow().collectAsState(initial = IslandGeometry.TOP_GAP_DP)
     val pillHeightDp by prefs.pillHeightDpFlow().collectAsState(initial = IslandGeometry.PILL_HEIGHT_DP)
     val idleWidthDp by prefs.idleWidthDpFlow().collectAsState(initial = IslandGeometry.IDLE_WIDTH_DP)
@@ -179,6 +182,20 @@ fun rememberIslandState(): IslandState {
         }
         if (showBluetooth == true && bluetooth.connected) {
             add(IslandActivity.Bluetooth(bluetooth.deviceName, bluetooth.batteryPercent))
+        }
+        if (showMedia == true) {
+            media?.let { item ->
+                add(
+                    IslandActivity.Media(
+                        packageName = item.packageName,
+                        appLabel = item.appLabel,
+                        title = item.title,
+                        artist = item.artist,
+                        icon = item.icon,
+                        isPlaying = item.isPlaying,
+                    ),
+                )
+            }
         }
         if (showNotifications == true) {
             notifications.take(MAX_NOTIFICATION_TILES).forEach { item ->
@@ -245,7 +262,9 @@ fun IslandHost(state: IslandState) {
             Spacer(Modifier.height(dropDown))
             AnimatedContent(
                 targetState = showPanel,
-                transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(120)) },
+                transitionSpec = {
+                    fadeIn(tween(190)) togetherWith fadeOut(tween(130))
+                },
                 label = "islandMode",
             ) { panel ->
                 if (panel) {
@@ -348,6 +367,11 @@ private fun PrimaryGlyph(activity: IslandActivity, size: Dp) {
             size = size,
             fallbackColor = NotificationAccent,
         )
+        is IslandActivity.Media -> AppIcon(
+            bitmap = activity.icon,
+            size = size,
+            fallbackColor = MediaAccent,
+        )
     }
 }
 
@@ -359,6 +383,7 @@ private fun PrimaryTrailing(activity: IslandActivity, notificationCount: Int) {
             activity.batteryPercent?.let { Label("$it%", BluetoothBlue) }
         is IslandActivity.Notification ->
             if (notificationCount > 1) Label("$notificationCount", NotificationAccent) else Unit
+        is IslandActivity.Media -> Unit
     }
 }
 
@@ -419,8 +444,13 @@ private fun TileEntrance(index: Int, content: @Composable () -> Unit) {
 @Composable
 private fun ActivityTile(activity: IslandActivity, index: Int) {
     val context = LocalContext.current
-    val launchable = (activity as? IslandActivity.Notification)?.let { notification ->
-        context.packageManager.getLaunchIntentForPackage(notification.packageName)
+    val launchPackage = when (activity) {
+        is IslandActivity.Notification -> activity.packageName
+        is IslandActivity.Media -> activity.packageName
+        else -> null
+    }
+    val launchable = launchPackage?.let { pkg ->
+        context.packageManager.getLaunchIntentForPackage(pkg)
             ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     val shape = RoundedCornerShape(IslandGeometry.TILE_RADIUS_DP.dp)
@@ -482,6 +512,11 @@ private fun ActivityTile(activity: IslandActivity, index: Int) {
                     size = 28.dp,
                     fallbackColor = NotificationAccent,
                 )
+                is IslandActivity.Media -> AppIcon(
+                    bitmap = activity.icon,
+                    size = 28.dp,
+                    fallbackColor = MediaAccent,
+                )
             }
         }
 
@@ -517,6 +552,15 @@ private fun ActivityTile(activity: IslandActivity, index: Int) {
             )
             Spacer(Modifier.width(2.dp))
         }
+
+        if (activity is IslandActivity.Media) {
+            Spacer(Modifier.width(2.dp))
+            MediaTransportGlyph(
+                playing = activity.isPlaying,
+                modifier = Modifier.size(16.dp),
+                color = BoltWhite,
+            )
+        }
     }
 }
 
@@ -524,6 +568,7 @@ private fun IslandActivity.tileTitle(): String = when (this) {
     is IslandActivity.Charging -> "Charging"
     is IslandActivity.Bluetooth -> deviceName ?: "Bluetooth audio"
     is IslandActivity.Notification -> title
+    is IslandActivity.Media -> title
 }
 
 private fun IslandActivity.tileSubtitle(): String = when (this) {
@@ -534,18 +579,21 @@ private fun IslandActivity.tileSubtitle(): String = when (this) {
     }
     is IslandActivity.Bluetooth -> "Connected"
     is IslandActivity.Notification -> text.ifBlank { appLabel }
+    is IslandActivity.Media -> artist?.takeIf { it.isNotBlank() } ?: appLabel
 }
 
 private fun IslandActivity.tileTrailing(): String? = when (this) {
     is IslandActivity.Charging -> "$level%"
     is IslandActivity.Bluetooth -> batteryPercent?.let { "$it%" } ?: "On"
     is IslandActivity.Notification -> null
+    is IslandActivity.Media -> null
 }
 
 private fun IslandActivity.accent(): Color = when (this) {
     is IslandActivity.Charging -> ChargingGreen
     is IslandActivity.Bluetooth -> BluetoothBlue
     is IslandActivity.Notification -> NotificationAccent
+    is IslandActivity.Media -> MediaAccent
 }
 
 @Composable
@@ -615,6 +663,46 @@ private fun EarbudGlyph(modifier: Modifier = Modifier, color: Color = BoltWhite)
                 cornerRadius = CornerRadius(stemW / 2f),
                 style = Fill,
             )
+        }
+    }
+}
+
+/** Play / pause transport glyph for the media tile. */
+@Composable
+private fun MediaTransportGlyph(
+    playing: Boolean,
+    modifier: Modifier = Modifier,
+    color: Color = BoltWhite,
+) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        if (playing) {
+            val barW = w * 0.26f
+            val gap = w * 0.20f
+            val left = (w - (barW * 2f + gap)) / 2f
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(left, h * 0.12f),
+                size = Size(barW, h * 0.76f),
+                cornerRadius = CornerRadius(barW * 0.35f),
+                style = Fill,
+            )
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(left + barW + gap, h * 0.12f),
+                size = Size(barW, h * 0.76f),
+                cornerRadius = CornerRadius(barW * 0.35f),
+                style = Fill,
+            )
+        } else {
+            val path = Path().apply {
+                moveTo(w * 0.24f, h * 0.12f)
+                lineTo(w * 0.82f, h * 0.50f)
+                lineTo(w * 0.24f, h * 0.88f)
+                close()
+            }
+            drawPath(path = path, color = color)
         }
     }
 }

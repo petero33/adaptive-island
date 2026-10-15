@@ -120,6 +120,9 @@ class IslandOverlayService :
             setViewTreeViewModelStoreOwner(this@IslandOverlayService)
             setViewTreeSavedStateRegistryOwner(this@IslandOverlayService)
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            // Force a hardware layer so the island is GPU-composited and never
+            // re-rasterised (the source of the pixelation during expansion).
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
             setContent {
                 IslandHost(state = rememberIslandState())
             }
@@ -153,6 +156,9 @@ class IslandOverlayService :
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             y = IslandGeometry.topGapPx(this@IslandOverlayService)
             alpha = 1f
+            // No system window transition: the island animates itself, and the
+            // default resize animation is what pixelated the growing stack.
+            windowAnimations = 0
             applyCutoutPolicy(this)
         }
 

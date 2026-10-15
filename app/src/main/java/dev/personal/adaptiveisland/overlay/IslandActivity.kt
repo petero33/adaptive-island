@@ -32,4 +32,15 @@ sealed interface IslandActivity {
     ) : IslandActivity {
         override val id: String = "notification:$key"
     }
+
+    data class Media(
+        val packageName: String,
+        val appLabel: String,
+        val title: String,
+        val artist: String?,
+        val icon: android.graphics.Bitmap?,
+        val isPlaying: Boolean,
+    ) : IslandActivity {
+        override val id: String = "media"
+    }
 }
