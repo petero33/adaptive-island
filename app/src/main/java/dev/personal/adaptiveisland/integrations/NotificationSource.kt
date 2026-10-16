@@ -136,26 +136,58 @@ object NotificationSource {
 
     /**
      * Fires the notification action at [index]. For RemoteInput ("Reply")
-     * actions, [text] is attached as the reply result; other actions ignore it.
+     * actions, [text] is attached as the reply result if provided.
      */
     fun fireAction(context: Context, key: String, index: Int, text: String? = null): Boolean {
         val action = registry[key]?.actions?.getOrNull(index) ?: return false
-        return runCatching {
-            if (action.remoteInputs.isNotEmpty()) {
-            // Do not inject text from the overlay; fire the action so the app opens its composer.
-            action.intent.send()
-        } else {
-            action.intent.send()
+        val fillInIntent = Intent()
+        if (!text.isNullOrBlank() && action.remoteInputs.isNotEmpty()) {
+            val bundle = Bundle()
+            action.remoteInputs.forEach { remoteInput ->
+                bundle.putCharSequence(remoteInput.resultKey, text)
+            }
+            RemoteInput.addResultsToIntent(action.remoteInputs.toTypedArray(), fillInIntent, bundle)
         }
+        val options = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            android.app.ActivityOptions.makeBasic().apply {
+                pendingIntentBackgroundActivityStartMode =
+                    android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+            }.toBundle()
+        } else {
+            null
+        }
+        return runCatching {
+            action.intent.send(context, 0, fillInIntent, null, null, null, options)
         }.onFailure { Log.w(TAG, "fireAction(${action.label}) failed", it) }.isSuccess
     }
 
     /** Opens the notification (its content intent, deep-linking into the app). */
-    fun open(key: String): Boolean {
+    fun open(context: Context, key: String): Boolean {
         val pi = registry[key]?.open ?: return false
-        return runCatching { pi.send() }
-            .onFailure { Log.w(TAG, "open failed", it) }
-            .isSuccess
+        val options = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            android.app.ActivityOptions.makeBasic().apply {
+                pendingIntentBackgroundActivityStartMode =
+                    android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+            }.toBundle()
+        } else {
+            null
+        }
+        return runCatching {
+            pi.send(context, 0, null, null, null, null, options)
+        }.onFailure { Log.w(TAG, "open failed", it) }.isSuccess
+    }
+
+    /**
+     * Dismisses the notification from the system status bar and immediately
+     * removes it from local island state.
+     */
+    fun dismiss(key: String) {
+        IslandNotificationListener.dismiss(key)
+        val current = _notifications.value
+        val updated = current.filterNot { it.key == key }
+        if (updated != current) {
+            publish(updated)
+        }
     }
 
     internal fun publish(items: List<NotificationItem>) {
@@ -191,11 +223,38 @@ object MediaSource {
     internal var controller: MediaController? = null
         private set
 
+    private val mediaCallback = object : MediaController.Callback() {
+        override fun onPlaybackStateChanged(state: PlaybackState?) {
+            val playing = state?.state == PlaybackState.STATE_PLAYING ||
+                state?.state == PlaybackState.STATE_BUFFERING
+            val currentItem = _nowPlaying.value ?: return
+            if (currentItem.isPlaying != playing) {
+                _nowPlaying.value = currentItem.copy(isPlaying = playing)
+            }
+        }
+
+        override fun onMetadataChanged(metadata: MediaMetadata?) {
+            val currentItem = _nowPlaying.value ?: return
+            val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
+                ?.takeIf { it.isNotBlank() }
+            val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST)
+                ?: metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
+            val icon = metadata?.let {
+                it.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                    ?: it.getBitmap(MediaMetadata.METADATA_KEY_ART)
+            }
+            _nowPlaying.value = currentItem.copy(
+                title = title ?: currentItem.title,
+                artist = artist ?: currentItem.artist,
+                icon = icon ?: currentItem.icon,
+            )
+        }
+    }
+
     internal fun attach(item: MediaItem?, controller: MediaController?) {
         if (this.controller !== controller) {
-            runCatching { this.controller?.unregisterCallback(emptyCallback) }
-            // MediaController from getActiveSessions shouldn't be released arbitrarily in all versions
-            // Ignore release if unavailable; just detach
+            runCatching { this.controller?.unregisterCallback(mediaCallback) }
+            runCatching { controller?.registerCallback(mediaCallback) }
         }
         this.controller = controller
         if (_nowPlaying.value == item) return
@@ -229,8 +288,6 @@ object MediaSource {
     fun previous() {
         controller?.transportControls?.skipToPrevious()
     }
-
-    private val emptyCallback = object : MediaController.Callback() {}
 }
 
 /**
@@ -248,6 +305,7 @@ class IslandNotificationListener : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        instance = this
         schedule(immediate = true)
     }
 
@@ -260,6 +318,7 @@ class IslandNotificationListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        if (instance === this) instance = null
         scope.cancel()
         super.onDestroy()
     }
@@ -357,10 +416,6 @@ class IslandNotificationListener : NotificationListenerService() {
         return Pair(item, session)
     }
 
-    private fun toMediaCompat(sbn: StatusBarNotification): MediaItem? {
-        return toMediaWithController(sbn)?.first
-    }
-
     private fun toItem(sbn: StatusBarNotification): NotificationItem? {
         val notification = sbn.notification ?: return null
         val extras = notification.extras ?: return null
@@ -397,46 +452,6 @@ class IslandNotificationListener : NotificationListenerService() {
             hasActions = registered.isNotEmpty(),
             hasReply = hasReply,
             sensitive = notification.visibility == Notification.VISIBILITY_SECRET,
-        )
-    }
-
-    private fun toMedia(sbn: StatusBarNotification): MediaItem? {
-        val notification = sbn.notification ?: return null
-        val extras = notification.extras ?: return null
-        val packageName = sbn.packageName ?: return null
-
-        // Prefer the notification's own text; fall back to the live media
-        // session metadata, which is all some players (and system cast UIs)
-        // expose — their notifications carry only a session token.
-        val session = resolveSession(notification)
-        val metadata = session?.metadata
-
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
-            ?.takeIf { it.isNotBlank() }
-            ?: metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() }
-            ?: return null
-
-        val artist = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
-            ?.takeIf { it.isNotBlank() }
-            ?: extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.takeIf { it.isNotBlank() }
-            ?: metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST)?.takeIf { it.isNotBlank() }
-            ?: metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)?.takeIf { it.isNotBlank() }
-
-        val icon = largeIcon(notification)
-            ?: metadata?.let { it.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART) ?: it.getBitmap(MediaMetadata.METADATA_KEY_ART) }
-            ?: appIcon(packageName)
-
-        val playing = session?.playbackState?.state == PlaybackState.STATE_PLAYING ||
-            notification.isPlaying()
-
-        return MediaItem(
-            packageName = packageName,
-            appLabel = appLabel(packageName),
-            title = title,
-            artist = artist,
-            icon = icon,
-            isPlaying = playing,
-            postedAt = sbn.postTime,
         )
     }
 
@@ -512,7 +527,12 @@ class IslandNotificationListener : NotificationListenerService() {
         null
     }
 
-    private companion object {
-        const val DEBOUNCE_MS = 90L
+    companion object {
+        private const val DEBOUNCE_MS = 90L
+        private var instance: IslandNotificationListener? = null
+
+        fun dismiss(key: String) {
+            runCatching { instance?.cancelNotification(key) }
+        }
     }
 }

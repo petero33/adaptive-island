@@ -120,9 +120,6 @@ class IslandOverlayService :
             setViewTreeViewModelStoreOwner(this@IslandOverlayService)
             setViewTreeSavedStateRegistryOwner(this@IslandOverlayService)
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
-            // Force a hardware layer so the island is GPU-composited and never
-            // re-rasterised (the source of the pixelation during expansion).
-            setLayerType(View.LAYER_TYPE_HARDWARE, null)
             setContent {
                 IslandHost(state = rememberIslandState())
             }
@@ -150,7 +147,8 @@ class IslandOverlayService :
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+                or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL

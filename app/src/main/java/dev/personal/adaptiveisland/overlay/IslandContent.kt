@@ -9,25 +9,35 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.togetherWith
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-
-
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,6 +47,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -52,11 +63,17 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import kotlin.math.roundToInt
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -89,6 +106,7 @@ import dev.personal.adaptiveisland.integrations.NotificationSource
 import dev.personal.adaptiveisland.persistence.FeaturePreferences
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 
 /** Everything the island needs to decide what to present. */
 data class IslandState(
@@ -370,48 +388,74 @@ fun IslandHost(state: IslandState) {
         if (!visible) return@MaterialTheme
 
         val spacing = IslandGeometry.TILE_SPACING_DP.dp
-        val collapsedWidth = state.idleWidthDp.dp +
+        val targetPillWidth = state.idleWidthDp.dp +
             if (hasContent) IslandGeometry.ACTIVE_EXTRA_WIDTH_DP.dp else 0.dp
+        val animatedPillWidth by animateDpAsState(
+            targetValue = targetPillWidth,
+            animationSpec = tween(160, easing = FastOutSlowInEasing),
+            label = "pillWidth",
+        )
         val pillHeight = state.pillHeightDp.dp
         val tapZone = IslandGeometry.TAP_ZONE_HEIGHT_DP.dp
 
-        // The whole stack drops smoothly as the island expands, so the top card
-        // clears the status bar / camera cutout.
-        val dropDown by animateDpAsState(
-            targetValue = if (showPanel) IslandGeometry.EXPANDED_TOP_OFFSET_DP.dp else 0.dp,
-            animationSpec = spring(
-                dampingRatio = 0.82f,
-                stiffness = Spring.StiffnessMediumLow,
-            ),
-            label = "expandDrop",
-        )
-
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Spacer(Modifier.height(dropDown))
-            AnimatedContent(
-                targetState = showPanel,
-                transitionSpec = {
-                    fadeIn(tween(190)) togetherWith fadeOut(tween(130))
-                },
-                label = "islandMode",
-            ) { panel ->
-                if (panel) {
-                    ExpandedPanel(
-                        state = state,
-                        spacing = spacing,
-                        focusedId = focused?.id,
-                        reduceEffects = state.reduceEffects,
-                    )
+        // Single AnimatedContent: the island grows DOWN from the pill.
+        // All motion is tween-based (deterministic, no oscillation).
+        // The SizeTransform keyframes punch past full size by ~3% at 80ms then
+        // settle — that is the "stretch & snap" without any jiggle.
+        AnimatedContent(
+            targetState = showPanel,
+            transitionSpec = {
+                if (targetState) {
+                    // EXPAND  ─ content fades in while the container grows downward.
+                    fadeIn(tween(140, easing = FastOutSlowInEasing))
+                        .togetherWith(fadeOut(tween(80)))
+                        .using(
+                            SizeTransform(clip = true) { _, targetSize ->
+                                // Grow past full height slightly, then snap back —
+                                // this is the "stretch" feel, done in one pass, no loop.
+                                keyframes {
+                                    durationMillis = 200
+                                    // Slight overshoot at 80 ms
+                                    IntSize(targetSize.width, (targetSize.height * 1.03f).toInt()) at 80 using LinearOutSlowInEasing
+                                    // Settle at 200 ms
+                                    targetSize at 200 using FastOutSlowInEasing
+                                }
+                            }
+                        )
                 } else {
-                    CollapsedPill(
-                        state = state,
-                        focused = focused,
-                        width = collapsedWidth,
-                        pillHeight = pillHeight,
-                        tapZone = tapZone,
-                        reduceEffects = state.reduceEffects,
-                    )
+                    // COLLAPSE  ─ shrinks upward cleanly in 130 ms, no bounce.
+                    fadeIn(tween(100, easing = FastOutSlowInEasing))
+                        .togetherWith(
+                            fadeOut(tween(70)) +
+                                shrinkVertically(
+                                    animationSpec = tween(130, easing = FastOutSlowInEasing),
+                                    shrinkTowards = Alignment.Top,
+                                )
+                        ).using(
+                            SizeTransform(clip = true) { _, _ ->
+                                tween(130, easing = FastOutSlowInEasing)
+                            }
+                        )
                 }
+            },
+            label = "islandMode",
+        ) { panel ->
+            if (panel) {
+                ExpandedPanel(
+                    state = state,
+                    spacing = spacing,
+                    focusedId = focused?.id,
+                    reduceEffects = state.reduceEffects,
+                )
+            } else {
+                CollapsedPill(
+                    state = state,
+                    focused = focused,
+                    width = animatedPillWidth,
+                    pillHeight = pillHeight,
+                    tapZone = tapZone,
+                    reduceEffects = state.reduceEffects,
+                )
             }
         }
     }
@@ -447,11 +491,23 @@ private fun CollapsedPill(
         }
     }
 
+    var isPressed by remember { mutableStateOf(false) }
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed && !reduceEffects) 0.96f else 1f,
+        animationSpec = spring(
+            dampingRatio = 0.75f,
+            stiffness = 1200f,
+        ),
+        label = "pressScale",
+    )
+
     Column(
         modifier = Modifier
             .width(width)
+            .scale(pressScale)
             .islandGestures(
                 enabled = state.stackEnabled && activities.size > 1,
+                onPressChange = { isPressed = it },
                 onTap = { if (state.hasContent) IslandExpansion.toggle() },
                 onSwipe = cycle,
             ),
@@ -474,7 +530,14 @@ private fun CollapsedPill(
             AnimatedContent(
                 targetState = focused,
                 transitionSpec = {
-                    fadeIn(tween(160)) togetherWith fadeOut(tween(120))
+                    (fadeIn(spring(dampingRatio = 0.82f, stiffness = 900f)) +
+                        slideInHorizontally(spring(dampingRatio = 0.82f, stiffness = 900f)) { it / 2 } +
+                        scaleIn(initialScale = 0.88f, animationSpec = spring(dampingRatio = 0.82f, stiffness = 900f)))
+                        .togetherWith(
+                            fadeOut(tween(60)) +
+                                slideOutHorizontally(spring(dampingRatio = 0.82f, stiffness = 900f)) { -it / 2 } +
+                                scaleOut(targetScale = 0.88f)
+                        )
                 },
                 label = "pillActivity",
             ) { activity ->
@@ -483,7 +546,7 @@ private fun CollapsedPill(
                 }
             }
         }
-        if (state.hasContent) {
+        if (state.hasContent || state.showIdlePill) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -494,43 +557,54 @@ private fun CollapsedPill(
 }
 
 /**
- * Lightweight tap / horizontal-swipe detector. Lets the compact pill cycle
- * between activities with a flick, and expand on a plain tap.
+ * Robust tap / horizontal-swipe detector with tactile press feedback and
+ * safe cancellation handling.
  */
 private fun Modifier.islandGestures(
     enabled: Boolean,
+    onPressChange: (Boolean) -> Unit = {},
     onTap: () -> Unit,
     onSwipe: (Int) -> Unit,
-): Modifier = if (!enabled) {
-    this.pointerInput(Unit) { detectTapGestures { onTap() } }
-} else {
-    this.pointerInput(Unit) {
-        val threshold = 36.dp.toPx()
-        val slop = viewConfiguration.touchSlop
-        awaitPointerEventScope {
+): Modifier = this.pointerInput(enabled) {
+    val threshold = 32.dp.toPx()
+    val slop = viewConfiguration.touchSlop
+    awaitPointerEventScope {
+        while (true) {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            onPressChange(true)
+            var totalDx = 0f
+            var totalDy = 0f
+            var up = false
+            val pointerId = down.id
+
             while (true) {
-                val down = awaitFirstDown(requireUnconsumed = false)
-                var totalDx = 0f
-                var totalDy = 0f
-                var up = false
-                while (true) {
-                    val event = awaitPointerEvent()
-                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                    if (change.changedToUpIgnoreConsumed()) {
-                        up = true
-                        break
-                    }
-                    val delta = change.positionChange()
-                    totalDx += delta.x
-                    totalDy += delta.y
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == pointerId }
+                if (change == null) {
+                    break
                 }
-                if (!up) continue
+                if (change.changedToUpIgnoreConsumed()) {
+                    up = true
+                    change.consume()
+                    break
+                }
+                val delta = change.positionChange()
+                totalDx += delta.x
+                totalDy += delta.y
+                if (kotlin.math.abs(totalDx) > slop || kotlin.math.abs(totalDy) > slop) {
+                    change.consume()
+                }
+            }
+            onPressChange(false)
+            if (up) {
                 when {
-                    kotlin.math.abs(totalDx) > threshold &&
-                        kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy) ->
+                    enabled && kotlin.math.abs(totalDx) > threshold &&
+                        kotlin.math.abs(totalDx) > kotlin.math.abs(totalDy) -> {
                         onSwipe(if (totalDx < 0f) 1 else -1)
-                    kotlin.math.abs(totalDx) < slop && kotlin.math.abs(totalDy) < slop ->
+                    }
+                    kotlin.math.abs(totalDx) < slop && kotlin.math.abs(totalDy) < slop -> {
                         onTap()
+                    }
                 }
             }
         }
@@ -584,11 +658,22 @@ private fun PageDots(count: Int, index: Int, modifier: Modifier = Modifier) {
     ) {
         repeat(count) { i ->
             val active = i == index
+            val dotWidth by animateDpAsState(
+                targetValue = if (active) 10.dp else 4.dp,
+                animationSpec = spring(dampingRatio = 0.82f, stiffness = 900f),
+                label = "dotWidth_$i",
+            )
+            val dotAlpha by animateFloatAsState(
+                targetValue = if (active) 0.90f else 0.35f,
+                animationSpec = spring(dampingRatio = 0.82f, stiffness = 900f),
+                label = "dotAlpha_$i",
+            )
             Box(
                 modifier = Modifier
-                    .size(if (active) 5.dp else 3.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = if (active) 0.85f else 0.35f)),
+                    .height(3.5.dp)
+                    .width(dotWidth)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color.White.copy(alpha = dotAlpha)),
             )
         }
     }
@@ -665,6 +750,12 @@ private fun ExpandedPanel(
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(spacing),
+        modifier = Modifier.animateContentSize(
+            animationSpec = spring(
+                dampingRatio = 0.75f,
+                stiffness = 480f,
+            ),
+        ),
     ) {
         ordered.forEachIndexed { index, activity ->
             TileEntrance(index = index, activityId = activity.id, reduceEffects = reduceEffects) {
@@ -675,6 +766,9 @@ private fun ExpandedPanel(
                         index = index,
                         quickActionsEnabled = state.quickActionsEnabled,
                         reduceEffects = reduceEffects,
+                        onDismiss = {
+                            NotificationSource.dismiss(activity.key)
+                        },
                     )
                     else -> ActivityTile(activity, index, reduceEffects)
                 }
@@ -690,24 +784,25 @@ private fun TileEntrance(
     reduceEffects: Boolean,
     content: @Composable () -> Unit,
 ) {
-    var revealed by remember(activityId) { mutableStateOf(reduceEffects) }
-    LaunchedEffect(activityId, reduceEffects) {
-        if (reduceEffects) {
-            revealed = true
-            return@LaunchedEffect
-        }
-        delay(index * 55L)
-        revealed = true
-    }
+    // Reveal immediately — no coroutine delay. The container's own
+    // SizeTransform controls the visible timing so a separate stagger
+    // just adds perceived lag without any aesthetic benefit.
+    var revealed by remember(activityId) { mutableStateOf(true) }
+    LaunchedEffect(activityId) { revealed = true }
     AnimatedVisibility(
         visible = revealed,
-        enter = fadeIn(tween(200)) + slideInVertically(
-            animationSpec = spring(
-                dampingRatio = 0.7f,
-                stiffness = Spring.StiffnessMediumLow,
+        // Tiles materialise downward in step with the container — pure tween,
+        // no spring, no oscillation.
+        enter = fadeIn(tween(130, easing = FastOutSlowInEasing)) +
+            expandVertically(
+                animationSpec = tween(160, easing = FastOutSlowInEasing),
+                expandFrom = Alignment.Top,
             ),
-            initialOffsetY = { -it / 3 },
-        ),
+        exit = fadeOut(tween(70)) +
+            shrinkVertically(
+                animationSpec = tween(100, easing = FastOutSlowInEasing),
+                shrinkTowards = Alignment.Top,
+            ),
     ) {
         content()
     }
@@ -715,16 +810,34 @@ private fun TileEntrance(
 
 @Composable
 private fun MediaTile(activity: IslandActivity.Media, index: Int, reduceEffects: Boolean) {
+    val context = LocalContext.current
+    val launchable = remember(activity.packageName) {
+        context.packageManager.getLaunchIntentForPackage(activity.packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    val openMediaApp = {
+        if (launchable != null) {
+            runCatching { context.startActivity(launchable) }
+            IslandExpansion.collapse()
+        }
+    }
+
     val shape = RoundedCornerShape(IslandGeometry.TILE_RADIUS_DP.dp)
     Column(
         modifier = Modifier
             .widthIn(min = 220.dp, max = 340.dp)
             .height(96.dp)
             .glassIsland(shape)
+            .islandSheen(index, reduceEffects)
             .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = launchable != null, onClick = openMediaApp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             AppIcon(bitmap = activity.icon, size = 40.dp, fallbackColor = MediaAccent)
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -750,13 +863,13 @@ private fun MediaTile(activity: IslandActivity.Media, index: Int, reduceEffects:
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
                     .size(42.dp)
                     .clickable { MediaSource.previous() },
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.Center,
             ) {
                 PreviousGlyph(modifier = Modifier.size(20.dp))
             }
@@ -765,7 +878,7 @@ private fun MediaTile(activity: IslandActivity.Media, index: Int, reduceEffects:
                 modifier = Modifier
                     .size(52.dp)
                     .clickable { MediaSource.toggle() },
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.Center,
             ) {
                 MediaTransportGlyph(
                     playing = activity.isPlaying,
@@ -778,7 +891,7 @@ private fun MediaTile(activity: IslandActivity.Media, index: Int, reduceEffects:
                 modifier = Modifier
                     .size(42.dp)
                     .clickable { MediaSource.next() },
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.Center,
             ) {
                 NextGlyph(modifier = Modifier.size(20.dp))
             }
@@ -792,6 +905,7 @@ private fun NotificationTile(
     index: Int,
     quickActionsEnabled: Boolean,
     reduceEffects: Boolean,
+    onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
     val shape = RoundedCornerShape(IslandGeometry.TILE_RADIUS_DP.dp)
@@ -806,35 +920,78 @@ private fun NotificationTile(
             ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     // Android 15/16 background-activity-launch rules block sending another app's
-    // content PendingIntent from a third-party overlay (it silently no-ops when
-    // pi.send() returns true). Our own startActivity is exempt because this uid
-    // owns a visible non-app window and runs a foreground service, so prefer it
-    // and keep the deep-link PendingIntent only as a fallback.
+    // content PendingIntent from a third-party overlay without creator/sender BAL opt-in.
+    // We try direct startActivity first, and if unavailable or fails, fall back to
+    // NotificationSource.open with MODE_BACKGROUND_ACTIVITY_START_ALLOWED.
     val open: () -> Unit = {
         val launched = launchable?.let { intent ->
             runCatching { context.startActivity(intent) }
                 .onFailure { Log.w(OPEN_TAG, "startActivity(${activity.packageName}) failed", it) }
                 .isSuccess
         } ?: false
-        if (!launched && !NotificationSource.open(activity.key)) {
-            Log.w(OPEN_TAG, "no launch or content intent for ${activity.packageName}")
+        if (!launched) {
+            val opened = NotificationSource.open(context, activity.key)
+            if (!opened) {
+                Log.w(OPEN_TAG, "no launch or content intent for ${activity.packageName}")
+            }
         }
         IslandSelection.select(activity.id)
         IslandExpansion.collapse()
     }
 
-    // Tapping a RemoteInput ("Reply") chip reveals a small inline text field;
-    // other chips fire their action immediately.
-    var replyIndex by remember(activity.key) { mutableStateOf<Int?>(null) }
-    var replyText by remember(activity.key) { mutableStateOf("") }
-
-    val sheen = rememberSheen(index, reduceEffects)
+    val offsetX = remember { Animatable(0f) }
+    val coroutineScope = rememberCoroutineScope()
+    var isDismissed by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
             .widthIn(min = 190.dp, max = 300.dp)
+            .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+            .alpha((1f - (kotlin.math.abs(offsetX.value) / 320f)).coerceIn(0f, 1f))
+            .pointerInput(activity.key) {
+                val dismissThresholdPx = 72.dp.toPx()
+                detectHorizontalDragGestures(
+                    onDragEnd = {
+                        val currentX = offsetX.value
+                        if (kotlin.math.abs(currentX) > dismissThresholdPx && !isDismissed) {
+                            isDismissed = true
+                            val targetX = if (currentX > 0) 500.dp.toPx() else -500.dp.toPx()
+                            coroutineScope.launch {
+                                offsetX.animateTo(
+                                    targetValue = targetX,
+                                    animationSpec = spring(dampingRatio = 0.80f, stiffness = 450f),
+                                )
+                                onDismiss()
+                            }
+                        } else if (!isDismissed) {
+                            coroutineScope.launch {
+                                offsetX.animateTo(
+                                    targetValue = 0f,
+                                    animationSpec = spring(dampingRatio = 0.74f, stiffness = 420f),
+                                )
+                            }
+                        }
+                    },
+                    onDragCancel = {
+                        if (!isDismissed) {
+                            coroutineScope.launch {
+                                offsetX.animateTo(
+                                    targetValue = 0f,
+                                    animationSpec = spring(dampingRatio = 0.74f, stiffness = 420f),
+                                )
+                            }
+                        }
+                    },
+                    onHorizontalDrag = { change, dragAmount ->
+                        change.consume()
+                        coroutineScope.launch {
+                            offsetX.snapTo(offsetX.value + dragAmount)
+                        }
+                    },
+                )
+            }
             .glassIsland(shape)
-            .sheenOverlay(sheen)
+            .islandSheen(index, reduceEffects)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(9.dp),
     ) {
@@ -914,31 +1071,27 @@ private fun QuickActionChip(
 }
 
 @Composable
-private fun rememberSheen(index: Int, reduceEffects: Boolean = false): Animatable<Float, *> {
-    val sheen = remember { Animatable(if (reduceEffects) 1f else 0f) }
-    LaunchedEffect(reduceEffects) {
-        if (reduceEffects) return@LaunchedEffect
-        // Subtler, faster sheen that runs once per appearance.
-        delay(index * 40L)
-        sheen.animateTo(1f, tween(durationMillis = 500, easing = FastOutSlowInEasing))
+private fun Modifier.islandSheen(index: Int, reduceEffects: Boolean): Modifier {
+    if (reduceEffects) return this
+    val sheen = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        sheen.animateTo(1f, tween(durationMillis = 200, easing = FastOutSlowInEasing))
     }
-    return sheen
-}
-
-private fun Modifier.sheenOverlay(sheen: Animatable<Float, *>): Modifier = drawWithContent {
-    drawContent()
-    val x = (sheen.value * 1.7f - 0.35f) * size.width
-    drawRect(
-        brush = Brush.linearGradient(
-            colors = listOf(
-                Color.Transparent,
-                Color(0x4DFFFFFF),
-                Color.Transparent,
+    return this.drawWithContent {
+        drawContent()
+        val x = (sheen.value * 1.7f - 0.35f) * size.width
+        drawRect(
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color.Transparent,
+                    Color(0x38FFFFFF),
+                    Color.Transparent,
+                ),
+                start = Offset(x - size.height, 0f),
+                end = Offset(x, size.height),
             ),
-            start = Offset(x - size.height, 0f),
-            end = Offset(x, size.height),
-        ),
-    )
+        )
+    }
 }
 
 @Composable
@@ -955,34 +1108,12 @@ private fun ActivityTile(activity: IslandActivity, index: Int, reduceEffects: Bo
     }
     val shape = RoundedCornerShape(IslandGeometry.TILE_RADIUS_DP.dp)
 
-    // One-shot liquid-glass sheen that sweeps across the card as it appears.
-    val sheen = remember { Animatable(if (reduceEffects) 1f else 0f) }
-    LaunchedEffect(reduceEffects) {
-        if (reduceEffects) return@LaunchedEffect
-        delay(index * 40L)
-        sheen.animateTo(1f, tween(durationMillis = 500, easing = FastOutSlowInEasing))
-    }
-
     Row(
         modifier = Modifier
             .height(IslandGeometry.TILE_HEIGHT_DP.dp)
             .widthIn(min = 150.dp, max = 300.dp)
             .glassIsland(shape)
-            .drawWithContent {
-                drawContent()
-                val x = (sheen.value * 1.7f - 0.35f) * size.width
-                drawRect(
-                    brush = Brush.linearGradient(
-                        colors = listOf(
-                            Color.Transparent,
-                            Color(0x4DFFFFFF),
-                            Color.Transparent,
-                        ),
-                        start = Offset(x - size.height, 0f),
-                        end = Offset(x, size.height),
-                    ),
-                )
-            }
+            .islandSheen(index, reduceEffects)
             .then(
                 if (launchable != null) {
                     Modifier.pointerInput(launchable) {
@@ -1232,11 +1363,11 @@ private fun MediaTransportGlyph(
  */
 @Composable
 private fun BatteryGlyph(percent: Int, modifier: Modifier = Modifier) {
-    val fillFraction by androidx.compose.animation.core.animateFloatAsState(
+    val fillFraction by animateFloatAsState(
         targetValue = (percent.coerceIn(0, 100)) / 100f,
-        animationSpec = androidx.compose.animation.core.spring(
-            dampingRatio = 0.65f,
-            stiffness = 220f,
+        animationSpec = spring(
+            dampingRatio = 0.72f,
+            stiffness = 300f,
         ),
         label = "batteryFill",
     )

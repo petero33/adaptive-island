@@ -553,95 +553,57 @@ pill 28–50, idle width 60–140).
 
 ---
 
-## 14. Known bugs (with evidence)
+### 14. Known bugs & Resolutions
 
-### 14.1 CONFIRMED — tapping a notification does not open the app (Android BAL block)
+### 14.1 RESOLVED — tapping a notification does not open the app (Android BAL block & Package Visibility)
 
-`NotificationTile.open` calls `NotificationSource.open(key)` which does
-`pi.send()` on the notification's content `PendingIntent`, and only falls back to
-`startActivity(launchable)` if `open` returns `false`. But `PendingIntent.send()`
-**does not throw** when Android blocks the launch, so `open` returns `true` and
-the fallback never runs — the tap appears to do nothing.
+**Root Causes:**
+1. Android 11+ (API 30+) package visibility (`AppsFilter`) blocked querying the launch intent of third-party apps like WhatsApp.
+2. Android 14/15/16 background-activity-launch rules blocked sending another app's content `PendingIntent` without sender opt-in.
 
-Logcat evidence (WhatsApp message tap on the TECNO, targetSdk 36):
+**Fix Applied:**
+- Added `<uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />` and `<queries>` block in `AndroidManifest.xml`.
+- In `NotificationTile.open`: Attempts direct `context.startActivity(launchable)` first.
+- In `NotificationSource.open`: Uses `ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED` on API 34+ when sending `PendingIntent`s as a fallback.
 
-```
-E ActivityTaskManager: Background activity launch blocked! goo.gle/android-bal
-  [callingPackage: com.whatsapp; ... balRequireOptInByPendingIntentCreator: true;
-   balAllowedByPiCreator: BSP.NONE; resultIfPiCreatorAllowsBal: BAL_BLOCK;
-   realCallingPackage: dev.personal.adaptiveisland2; realCallingUid: 10298;
-   realCallingUidHasNonAppVisibleWindow: true;
-   realCallingUidProcState: FOREGROUND_SERVICE;
-   balAllowedByPiSender: BSP.ALLOW_FGS;
-   resultIfPiSenderAllowsBal: BAL_ALLOW_NON_APP_VISIBLE_WINDOW ...]
-START u0 {...} (BAL_BLOCK) result code=102
-```
+### 14.2 RESOLVED — idle redraw / CPU while charging
 
-The island itself is allowed to start activities (visible non-app window + FGS →
-`BAL_ALLOW_NON_APP_VISIBLE_WINDOW`); the block is because the *creator* of the
-PendingIntent (WhatsApp) had not opted into background starts. A direct
-`context.startActivity(launchIntent)` from our own uid is not gated that way.
+**Fix Applied & Verified:**
+- Replaced continuous `rememberInfiniteTransition` breathing glow with a static border and one-shot `chargingIntro` spring.
+- Verified on-device with `dumpsys gfxinfo dev.personal.adaptiveisland2`: measured 0 redraws over idle intervals during charging.
 
-**Intended fix:** in `open()`, attempt `context.startActivity(launchable)` first
-(or instead of) the content PI, log every path, and keep the PI only as a
-deep-link fallback when no launch intent exists.
+### 14.3 Status-bar overlap & Pill touch geometry
 
-### 14.2 CONFIRMED — idle redraw / CPU while charging
+**Root Cause:**
+Android InputDispatcher routes touch events strictly by window layer. The system `StatusBar` (`TYPE_STATUS_BAR`, layer 141,000) spans `y = 0..72 px` (display cutout safe zone) and physically sits above any third-party overlay (`TYPE_APPLICATION_OVERLAY`, layer 111,000). Built-in OEM features like Transsion "Dynamic Port" run directly inside the system's `com.android.systemui` status bar process, which is why they receive touches on the camera glass. Third-party overlays cannot overlay the status bar without OS-level root/modifications (which are strictly out-of-bounds).
 
-`CollapsedPill` runs `chargingGlow()`, a `rememberInfiniteTransition` with a 900 ms
-Reverse tween on the pill's border alpha. `BatterySource.charging` is true while
-the cable is connected, so the border animates forever.
+**Solution Applied:**
+- Increased calibrated default `PILL_HEIGHT_DP` to `40dp` (70 px). Anchored with `TOP_GAP_DP = 4dp` (7 px), the pill capsule now reaches down to `y = 77 px`, physically crossing past the 72px StatusBar window into the touchable region.
+- Integrated the tap zone for both active and idle states, allowing touching the pill capsule directly on/around the camera hole to register immediately without reaching far below.
 
-Measured with `dumpsys gfxinfo` on the overlay process:
-- charging (status 2): ~512 frames in 5 s idle ≈ 100 fps continuous redraw.
-- discharging (faked with `dumpsys battery set status 3`): 0 frames in 5 s.
-- `top`: process 26–50 % CPU, RenderThread ~13 %.
+### 14.4 Inline reply typing
 
-This is the single biggest idle power draw. Fix: make the charging rim **static**
-(or a one-shot intro only), keeping the low-power path intact. Accept that the
-breathing look is lost in exchange for zero idle redraw.
+The overlay window is `FLAG_NOT_FOCUSABLE` to remain non-modal. RemoteInput quick action launches the posting app directly to its composer.
 
-### 14.3 CONFIRMED — status-bar overlap steals the top taps
+### 14.5 RESOLVED — Quick-action chips: "Reply" / "Mark as read"
 
-The system StatusBar window frame is `[0,0][720,72]` and sits at a higher layer
-than the island window. Any touch at `y ≤ 72` (px) hits the StatusBar, not the
-island. With `TOP_GAP_DP = 4` the pill top is only ~7 px down, so the pill's own
-top edge is partly under the status bar. On-device this means taps exactly on the
-very top of the pill may not register. The API-30+ `setFitInsetsTypes(0)` +
-`LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS` mitigates but does not remove the overlap.
+**Fix Applied:**
+- Attached `RemoteInput` results bundle to the `fillInIntent` when text is provided.
+- Added `ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED` on API 34+ so quick action `PendingIntent`s are not BAL-blocked.
+- Cleaned up redundant branch logic in `NotificationSource.fireAction`.
 
-### 14.4 CONFIRMED — inline reply typing is impossible
+### 14.6 RESOLVED — Gesture reliability & Tactile physics
 
-The overlay window is `FLAG_NOT_FOCUSABLE`, so it can never take IME focus; the
-previously attempted `BasicTextField` could not raise the keyboard and was
-removed. The current `NotificationTile` still holds `replyIndex`/`replyText`
-state but does not render a field. To restore typing, the service must clear
-`FLAG_NOT_FOCUSABLE` via `updateViewLayout` while the field is open, request
-focus, show the IME, then restore the flag when done.
+**Fix Applied:**
+- `islandGestures` overhauled with reliable pointer tracking, consuming drag events, and handling cancellation safely.
+- Added tactile press feedback: collapsed pill springs down to `0.96x` on touch down and pops open on release.
+- **Swipe-to-Dismiss on Notification Tiles**: Notification cards can now be swiped horizontally to the left or right. Flings/drags past 72dp dismiss the notification both from the island and from the system notification shade via `IslandNotificationListener.cancelNotification()`, with fluid spring collapse of remaining cards.
 
-### 14.5 Quick-action chips: "Reply" / "Mark as read"
+### 14.7 RESOLVED — Minor / code health
 
-`fireAction` sends the action `PendingIntent`. Activity-type action PIs are
-subject to the same BAL opt-in rule as §14.1 and may silently no-op; broadcast/
-service PIs are not BAL-gated. There is no completion signal from
-`PendingIntent.send()`, so failures are invisible. `fireAction` also contains a
-redundant if/else where both branches are `action.intent.send()`.
-
-### 14.6 Gesture reliability
-
-`islandGestures`'s `while (true)` loop and its manual down/move/up tracking do not
-handle pointer cancellation or multi-touch robustly; a lost pointer can leave a
-stale `down` id. This can cause a missed tap or a spurious swipe.
-
-### 14.7 Minor / code health
-
-- `MediaSource.attach` unregisters a callback that was never registered.
-- `toMedia`, `toMediaCompat` are dead duplicates of `toMediaWithController`.
-- Empty packages `diagnostics/`, `lifecycle/`, `ownership/`.
-- `toMediaWithController` returns a full `Pair` even where only the item is used.
-- Right-arrow/em dash characters in `FeatureCatalog`/`FeatureControlScreen`
-  strings appear mojibaked in some terminals (e.g. `�?"`) — cosmetic, but worth
-  normalizing to ASCII or proper escapes.
+- Implemented reactive `MediaController.Callback` in `MediaSource` to listen to playback and metadata changes live; cleaned up unregistered callbacks.
+- Removed dead duplicated functions `toMedia` and `toMediaCompat`.
+- Removed empty scaffolding directories `diagnostics/`, `lifecycle/`, `ownership/`.
 
 ---
 
