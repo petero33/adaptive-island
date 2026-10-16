@@ -1,10 +1,6 @@
 package dev.personal.adaptiveisland.app
 
-import android.content.Context
-import android.os.PowerManager
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,11 +9,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -32,15 +26,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.personal.adaptiveisland.activities.Capability
-import dev.personal.adaptiveisland.activities.FeatureCost
 import dev.personal.adaptiveisland.activities.FeatureGroup
 import dev.personal.adaptiveisland.activities.FeatureUiState
 import dev.personal.adaptiveisland.activities.Ownership
@@ -114,99 +104,6 @@ fun FeatureControlScreen(
                     }
                 }
             }
-
-            item { DiagnosticsCard(features) }
-        }
-    }
-}
-
-@Composable
-private fun DiagnosticsCard(features: List<FeatureUiState>) {
-    val context = LocalContext.current
-    val power = remember {
-        context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-    }
-    val powerSave = power?.isPowerSaveMode == true
-    val configurable = features.filterNot { it.definition.isMaster }
-    val active = configurable.filter { it.enabled }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(
-                text = "Resource diagnostics",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "The honest cost of each feature while it runs. Disabled features " +
-                    "cost nothing — the island never starts their listeners.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(10.dp))
-            KeyValueRow("Battery mode", if (powerSave) "Power save active" else "Normal")
-            KeyValueRow("Active features", "${active.size} of ${configurable.size}")
-            Spacer(Modifier.height(10.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-            Spacer(Modifier.height(10.dp))
-            active
-                .sortedByDescending { it.definition.cost.ordinal }
-                .forEach { state -> DiagnosisRow(state) }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-            Spacer(Modifier.height(10.dp))
-            Text(
-                text = "Adaptive low-power mode pauses idle animation and optional " +
-                    "listeners automatically when battery is low or power save is on.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun DiagnosisRow(state: FeatureUiState) {
-    val cost = state.definition.cost
-    val accent = when (cost) {
-        FeatureCost.LOW -> Color(0xFF30D158)
-        FeatureCost.MEDIUM -> Color(0xFFFFC12F)
-        FeatureCost.HIGH -> Color(0xFFFF453A)
-    }
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Box(
-            modifier = Modifier
-                .padding(top = 4.dp)
-                .size(8.dp)
-                .background(accent, CircleShape),
-        )
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = state.definition.title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = cost.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = accent,
-                )
-            }
-            Text(
-                text = state.definition.resourceNote.ifBlank { cost.detail },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }

@@ -18,7 +18,7 @@ import android.app.Notification
 object ActivityPriority {
 
     const val CALL = 100
-    const val TIMER = 90
+    const val TIMER = 95
     const val NAVIGATION = 80
     const val MEDIA = 70
     const val ACTIONABLE = 50
@@ -30,6 +30,10 @@ object ActivityPriority {
     fun score(activity: IslandActivity): Int = when (activity) {
         is IslandActivity.Charging -> CHARGING
         is IslandActivity.Bluetooth -> BLUETOOTH
+        is IslandActivity.Call -> CALL
+        is IslandActivity.Timer -> if (activity.finished) TIMER - 10 else TIMER
+        is IslandActivity.Stopwatch -> TIMER - 5
+        is IslandActivity.Navigation -> NAVIGATION
         is IslandActivity.Media -> MEDIA
         is IslandActivity.Notification -> rankNotification(activity.category, activity.hasActions)
     }

@@ -44,7 +44,12 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission().let { contract ->
             registerForActivityResult(contract) { }
         }
+    private val phoneStatePermission =
+        ActivityResultContracts.RequestPermission().let { contract ->
+            registerForActivityResult(contract) { }
+        }
     private var askedBluetooth = false
+    private var askedPhoneState = false
     private var askedNotificationAccess = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,6 +86,7 @@ class MainActivity : ComponentActivity() {
         syncOverlayService()
         maybeRequestNotificationPermission()
         maybeRequestBluetoothPermission()
+        maybeRequestPhoneStatePermission()
         maybeRequestNotificationAccess()
     }
     private fun syncOverlayService() {
@@ -119,6 +125,22 @@ class MainActivity : ComponentActivity() {
         if (!granted) {
             askedBluetooth = true
             bluetoothPermission.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+    }
+
+    private fun maybeRequestPhoneStatePermission() {
+        if (askedPhoneState) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val enabled = viewModel.features.value
+            .firstOrNull { it.definition.id == "calls" }?.enabled == true
+        if (!enabled) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.READ_PHONE_STATE,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            askedPhoneState = true
+            phoneStatePermission.launch(Manifest.permission.READ_PHONE_STATE)
         }
     }
 

@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -68,6 +69,7 @@ class IslandOverlayService :
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     private lateinit var windowManager: WindowManager
+    private lateinit var wakeLock: PowerManager.WakeLock
     private var islandView: View? = null
     private var windowParams: WindowManager.LayoutParams? = null
 
@@ -79,6 +81,7 @@ class IslandOverlayService :
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         windowManager = getSystemService(WindowManager::class.java)
         startInForeground()
+        acquireWakeLock()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
 
@@ -120,6 +123,9 @@ class IslandOverlayService :
             setViewTreeViewModelStoreOwner(this@IslandOverlayService)
             setViewTreeSavedStateRegistryOwner(this@IslandOverlayService)
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            // Force a hardware layer so the island is GPU-composited and never
+            // re-rasterised (the source of the pixelation during expansion).
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
             setContent {
                 IslandHost(state = rememberIslandState())
             }
@@ -148,7 +154,9 @@ class IslandOverlayService :
                 or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                 or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-                or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                or WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
+                or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -184,6 +192,20 @@ class IslandOverlayService :
         islandView?.let { runCatching { windowManager.removeView(it) } }
         islandView = null
         windowParams = null
+        releaseWakeLock()
+    }
+
+    private fun acquireWakeLock() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            "adaptive_island:wake_lock",
+        )
+        runCatching { wakeLock.acquire() }
+    }
+
+    private fun releaseWakeLock() {
+        runCatching { wakeLock.release() }
     }
 
     private fun startInForeground() {

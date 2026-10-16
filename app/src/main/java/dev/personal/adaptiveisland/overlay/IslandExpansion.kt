@@ -21,5 +21,7 @@ object IslandExpansion {
 
     fun toggle() = set(!_expanded.value)
 
+    fun expand() = set(true)
+
     fun collapse() = set(false)
 }

@@ -22,6 +22,14 @@ sealed interface IslandActivity {
         override val id: String = "bluetooth"
     }
 
+    data class Call(
+        val active: Boolean,
+        val callState: Int,
+        val handle: String?,
+    ) : IslandActivity {
+        override val id: String = "call"
+    }
+
     data class Notification(
         val key: String,
         val packageName: String,
@@ -31,7 +39,6 @@ sealed interface IslandActivity {
         val icon: android.graphics.Bitmap?,
         val category: String? = null,
         val hasActions: Boolean = false,
-        val hasReply: Boolean = false,
     ) : IslandActivity {
         override val id: String = "notification:$key"
     }
@@ -45,5 +52,33 @@ sealed interface IslandActivity {
         val isPlaying: Boolean,
     ) : IslandActivity {
         override val id: String = "media"
+    }
+
+    data class Timer(
+        val elapsedMillis: Long,
+        val running: Boolean,
+        val countdown: Boolean,
+        val targetMillis: Long,
+        val finished: Boolean,
+    ) : IslandActivity {
+        override val id: String = "timer"
+
+        val remainingMillis: Long get() = if (countdown) maxOf(0, targetMillis - elapsedMillis) else elapsedMillis
+    }
+
+    data class Stopwatch(
+        val elapsedMillis: Long,
+        val running: Boolean,
+    ) : IslandActivity {
+        override val id: String = "stopwatch"
+    }
+
+    data class Navigation(
+        val nextTurn: String?,
+        val distanceMeters: Int?,
+        val etaMillis: Long?,
+        val active: Boolean,
+    ) : IslandActivity {
+        override val id: String = "navigation"
     }
 }

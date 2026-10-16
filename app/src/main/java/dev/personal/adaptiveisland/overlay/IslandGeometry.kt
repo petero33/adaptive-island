@@ -18,7 +18,7 @@ object IslandGeometry {
 
     /** Idle pill. */
     const val IDLE_WIDTH_DP = 116
-    const val PILL_HEIGHT_DP = 40
+    const val PILL_HEIGHT_DP = 32
 
     /** Charging capsule: slightly wider so the glyph and percentage have room. */
     const val CHARGING_WIDTH_DP = 140
