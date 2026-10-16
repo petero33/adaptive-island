@@ -1,0 +1,17 @@
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+.kotlin/
+build.log
+build_release.log
+expanded_card_crop.png
+expanded_card_crop2.png
+expanded_screen.png
+screen_test.png

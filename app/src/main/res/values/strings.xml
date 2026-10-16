@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Adaptive Island 2.0</string>
+    <string name="settings_title">Feature control centre</string>
+    <string name="overlay_channel_name">Adaptive Island</string>
+    <string name="overlay_channel_description">Keeps the Adaptive Island pill running.</string>
+    <string name="overlay_notification_title">Adaptive Island</string>
+    <string name="overlay_notification_text">The island pill is active.</string>
+</resources>
